@@ -1,0 +1,19 @@
+# Core data
+numpy>=2.0
+h5py>=3.0
+pandas>=2.0
+
+# ML
+torch>=2.0
+
+# Visualisation
+matplotlib>=3.7
+seaborn>=0.13
+
+# Notebooks
+jupyter>=1.0
+notebook>=7.0
+ipykernel>=6.0
+
+# Utilities
+tqdm>=4.0
