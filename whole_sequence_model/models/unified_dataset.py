@@ -160,15 +160,18 @@ class UnifiedTrainDataset(Dataset):
     """
 
     def __init__(self, sequences, classes, cm_frac, aa_to_idx, mild_eps=0.02,
-                 max_len=None):
+                 max_len=None, conditions=None):
         """
-        sequences : list of (pid, seq_str) tuples
-        max_len   : optional int, discard proteins longer than this
+        sequences  : list of (pid, seq_str) tuples
+        max_len    : optional int, discard sequences longer than this
+        conditions : optional list of condition names to sample from;
+                     defaults to all PERTURBATION_CONDITIONS
         """
-        self.classes   = classes
-        self.cm_frac   = cm_frac
-        self.aa_to_idx = aa_to_idx
-        self.mild_eps  = mild_eps
+        self.classes     = classes
+        self.cm_frac     = cm_frac
+        self.aa_to_idx   = aa_to_idx
+        self.mild_eps    = mild_eps
+        self.conditions  = conditions if conditions is not None else PERTURBATION_CONDITIONS
 
         if max_len is not None:
             sequences = [(pid, seq) for pid, seq in sequences if len(seq) <= max_len]
@@ -187,7 +190,7 @@ class UnifiedTrainDataset(Dataset):
         labels = self.labels[idx]
 
         rng  = np.random.default_rng()          # unseeded → different every call
-        cond = PERTURBATION_CONDITIONS[rng.integers(len(PERTURBATION_CONDITIONS))]
+        cond = self.conditions[rng.integers(len(self.conditions))]
 
         p = generate_condition(seq, cond, self.cm_frac, self.classes, self.aa_to_idx, rng)
         p = apply_mild_noise(p, eps=self.mild_eps)
@@ -247,9 +250,10 @@ def collate_fn(batch):
 
 
 def make_train_loader(sequences, classes, cm_frac, aa_to_idx,
-                      batch_size=32, num_workers=4, mild_eps=0.02, max_len=1000):
+                      batch_size=32, num_workers=4, mild_eps=0.02, max_len=1000,
+                      conditions=None):
     ds = UnifiedTrainDataset(sequences, classes, cm_frac, aa_to_idx,
-                             mild_eps=mild_eps, max_len=max_len)
+                             mild_eps=mild_eps, max_len=max_len, conditions=conditions)
     return DataLoader(ds, batch_size=batch_size, shuffle=True,
                       collate_fn=collate_fn, num_workers=num_workers,
                       persistent_workers=(num_workers > 0))
