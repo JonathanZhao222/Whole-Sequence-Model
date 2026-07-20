@@ -10,9 +10,17 @@ N_AA = 20
 PERTURBATION_CONDITIONS = [
     'ground_truth',
     'perturb_gamma50', 'perturb_gamma10', 'perturb_gamma3', 'perturb_gamma1',
-    'scramble_1pct', 'scramble_5pct', 'scramble_10pct', 'scramble_20pct',
+    'decay_mild', 'decay_moderate', 'decay_strong', 'decay_severe',
     'lowconf_1pct', 'lowconf_5pct', 'lowconf_10pct', 'lowconf_20pct',
 ]
+
+# (gamma_0, repetitive_yield r): gamma(i) = gamma_0 * r^i
+DECAY_PARAMS = {
+    'decay_mild':     (10.0, 0.98),
+    'decay_moderate': (10.0, 0.95),
+    'decay_strong':   (10.0, 0.90),
+    'decay_severe':   (10.0, 0.80),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -69,16 +77,37 @@ def make_perturb_dirichlet(sequence, gamma, cm_frac, aa_to_idx, rng):
     return (samples / samples.sum(axis=1, keepdims=True)).astype(np.float32)
 
 
-def make_scrambled(base_sim, frac, rng):
-    """Permute the 20-dim probability vector at frac of positions."""
-    out = base_sim.copy()
-    L = out.shape[0]
-    n = int(round(L * frac))
-    if n > 0:
-        positions = rng.choice(L, size=n, replace=False)
-        for pos in positions:
-            out[pos] = rng.permutation(out[pos])
-    return out
+def trypsin_digest(sequence, max_len=50):
+    """Cleave after K or R, except when the next residue is P.
+    Each resulting peptide is truncated to max_len residues.
+    Returns a list of peptide strings (empty peptides filtered out)."""
+    peptides = []
+    start = 0
+    for i in range(len(sequence) - 1):
+        if sequence[i] in ('K', 'R') and sequence[i + 1] != 'P':
+            pep = sequence[start:i + 1]
+            if pep:
+                peptides.append(pep[:max_len])
+            start = i + 1
+    if start < len(sequence):
+        peptides.append(sequence[start:][:max_len])
+    return [p for p in peptides if p]
+
+
+def make_decay(sequence, gamma_0, r, cm_frac, aa_to_idx, rng):
+    """Edman degradation decay model: signal confidence falls with each cycle.
+
+    gamma(i) = gamma_0 * r^i where r is the repetitive yield per cycle.
+    At position 0 (N-terminus) concentration is gamma_0 above the confusion
+    matrix baseline; by position 49 with r=0.95 it has dropped to ~8% of that.
+    """
+    L = len(sequence)
+    true_idx = np.array([aa_to_idx[aa] for aa in sequence])
+    gammas = gamma_0 * (r ** np.arange(L, dtype=np.float64))
+    concentration = cm_frac[true_idx].copy()
+    concentration[np.arange(L), true_idx] += gammas
+    samples = rng.gamma(shape=concentration, scale=1.0)
+    return (samples / samples.sum(axis=1, keepdims=True)).astype(np.float32)
 
 
 def make_lowconf(base_sim, frac, rng):
@@ -102,11 +131,11 @@ def generate_condition(sequence, condition, cm_frac, classes, aa_to_idx, rng):
         gamma = float(condition[len('perturb_gamma'):])
         return make_perturb_dirichlet(sequence, gamma, cm_frac, aa_to_idx, rng)
 
-    base = simulate_vibeTag(sequence, classes, cm_frac, rng)
+    if condition in DECAY_PARAMS:
+        gamma_0, r = DECAY_PARAMS[condition]
+        return make_decay(sequence, gamma_0, r, cm_frac, aa_to_idx, rng)
 
-    if condition.startswith('scramble_'):
-        frac = float(condition[len('scramble_'):-len('pct')]) / 100.0
-        return make_scrambled(base, frac, rng)
+    base = simulate_vibeTag(sequence, classes, cm_frac, rng)
 
     if condition.startswith('lowconf_'):
         frac = float(condition[len('lowconf_'):-len('pct')]) / 100.0
@@ -174,17 +203,20 @@ class UnifiedEvalDataset(Dataset):
     """
     Loads a specific perturbation condition from the pre-generated eval h5.
     Applies the same eps-smoothing as training so metrics are on the same scale.
+
+    The h5 file is assumed to already contain only the val split (tryptic
+    peptides keyed by '{pid}_p{i}'). All entries are loaded.
     """
 
-    def __init__(self, h5_path, perturbation_key, pid_list, aa_to_idx, mild_eps=0.02):
+    def __init__(self, h5_path, perturbation_key, aa_to_idx, mild_eps=0.02):
         self.mild_eps = mild_eps
         self.data = []
         with h5py.File(h5_path, 'r') as f:
-            for pid in pid_list:
-                p   = f[pid][perturbation_key][()].astype(np.float32)
-                seq = f[pid]['sequence'][()].decode()
+            for key in f.keys():
+                p   = f[key][perturbation_key][()].astype(np.float32)
+                seq = f[key]['sequence'][()].decode()
                 lbl = np.array([aa_to_idx[aa] for aa in seq], dtype=np.int64)
-                p   = apply_mild_noise(p, eps=mild_eps)   # precompute once
+                p   = apply_mild_noise(p, eps=mild_eps)
                 self.data.append((torch.from_numpy(p), torch.from_numpy(lbl)))
 
     def __len__(self):
@@ -223,7 +255,7 @@ def make_train_loader(sequences, classes, cm_frac, aa_to_idx,
                       persistent_workers=(num_workers > 0))
 
 
-def make_eval_loader(h5_path, perturbation_key, pid_list, aa_to_idx,
+def make_eval_loader(h5_path, perturbation_key, aa_to_idx,
                      batch_size=64, mild_eps=0.02):
-    ds = UnifiedEvalDataset(h5_path, perturbation_key, pid_list, aa_to_idx, mild_eps)
+    ds = UnifiedEvalDataset(h5_path, perturbation_key, aa_to_idx, mild_eps)
     return DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
