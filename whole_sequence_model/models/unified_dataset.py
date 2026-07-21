@@ -211,11 +211,16 @@ class UnifiedEvalDataset(Dataset):
     peptides keyed by '{pid}_p{i}'). All entries are loaded.
     """
 
-    def __init__(self, h5_path, perturbation_key, aa_to_idx, mild_eps=0.02):
+    def __init__(self, h5_path, perturbation_key, aa_to_idx, mild_eps=0.02,
+                 key_list=None):
+        """
+        key_list : optional list of h5 group keys to load; loads all if None.
+        """
         self.mild_eps = mild_eps
         self.data = []
         with h5py.File(h5_path, 'r') as f:
-            for key in f.keys():
+            keys = key_list if key_list is not None else list(f.keys())
+            for key in keys:
                 p   = f[key][perturbation_key][()].astype(np.float32)
                 seq = f[key]['sequence'][()].decode()
                 lbl = np.array([aa_to_idx[aa] for aa in seq], dtype=np.int64)
@@ -260,6 +265,7 @@ def make_train_loader(sequences, classes, cm_frac, aa_to_idx,
 
 
 def make_eval_loader(h5_path, perturbation_key, aa_to_idx,
-                     batch_size=64, mild_eps=0.02):
-    ds = UnifiedEvalDataset(h5_path, perturbation_key, aa_to_idx, mild_eps)
+                     batch_size=64, mild_eps=0.02, key_list=None):
+    ds = UnifiedEvalDataset(h5_path, perturbation_key, aa_to_idx, mild_eps,
+                            key_list=key_list)
     return DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)

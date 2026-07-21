@@ -25,14 +25,15 @@ from models.unified_dataset import (
     make_train_loader, make_eval_loader, apply_bert_mask, trypsin_digest,
 )
 
-SEED      = 42
-EPOCHS    = 30
-BATCH     = 32
-LR        = 1e-3
-MAX_PEP   = 50
-MILD_EPS  = 0.02
-MASK_RATE = 0.15
-DEVICE    = 'cuda' if torch.cuda.is_available() else 'cpu'
+SEED        = 42
+EPOCHS      = 30
+BATCH       = 32
+LR          = 1e-3
+MAX_PEP     = 50
+MILD_EPS    = 0.02
+MASK_RATE   = 0.15
+MAX_PEPTIDES = 50_000   # random sample to keep CPU training tractable
+DEVICE      = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 SRC_H5    = Path(__file__).parent.parent / 'data' / 'synthetic' / 'naive_full_seed42.h5'
 EVAL_H5   = Path(__file__).parent.parent / 'data' / 'synthetic' / 'eval_tryptic_seed42.h5'
@@ -82,24 +83,38 @@ def main():
     pids      = rng_split.permutation(all_pids).tolist()
     train_pids = pids[:int(len(pids) * 0.8)]
 
-    # Build tryptic peptide list for training
+    # Build tryptic peptide list for training, then subsample
     train_peptides = []
     for pid in train_pids:
         for i, pep in enumerate(trypsin_digest(sequences[pid], max_len=MAX_PEP)):
             train_peptides.append((f'{pid}_p{i}', pep))
 
-    print(f'Train peptides: {len(train_peptides):,}')
+    rng_sample = np.random.default_rng(SEED + 1)
+    if len(train_peptides) > MAX_PEPTIDES:
+        idx = rng_sample.choice(len(train_peptides), size=MAX_PEPTIDES, replace=False)
+        train_peptides = [train_peptides[i] for i in idx]
+
+    print(f'Train peptides: {len(train_peptides):,}  (capped at {MAX_PEPTIDES:,})')
 
     train_loader = make_train_loader(
         train_peptides, classes, cm_frac, aa_to_idx,
         batch_size=BATCH, num_workers=4, mild_eps=MILD_EPS,
         conditions=DECAY_CONDITIONS,
     )
+    # Sample a fixed 10k-peptide eval subset (fast startup, still representative)
+    MAX_EVAL = 10_000
+    with h5py.File(EVAL_H5, 'r') as f:
+        all_eval_keys = list(f.keys())
+    rng_eval = np.random.default_rng(SEED + 2)
+    eval_keys = rng_eval.choice(all_eval_keys, size=min(MAX_EVAL, len(all_eval_keys)),
+                                replace=False).tolist()
+
     eval_loaders = {
         cond: make_eval_loader(EVAL_H5, cond, aa_to_idx,
-                               batch_size=64, mild_eps=MILD_EPS)
+                               batch_size=64, mild_eps=MILD_EPS, key_list=eval_keys)
         for cond in PERTURBATION_CONDITIONS
     }
+    print(f'Eval peptides:  {len(eval_keys):,} per condition')
     print(f'Train batches/epoch: {len(train_loader):,}')
 
     model = ConvDenoiser(d=128, dropout=0.1).to(DEVICE)
